@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "infoblox-unified-sales-demo"
+version = "2.1.0"
+description = "Unified Infoblox sales deployment plus DNS/DHCP/Threat Defense traffic and telemetry validation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "scapy>=2.5,<3", "PyYAML>=6.0", "boto3>=1.34", "requests>=2.31"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.4"]
+
+[project.scripts]
+demo = "demo_launcher:main"
+demo-workspace = "demo_workspace_launcher:main"
+
+[tool.setuptools.packages.find]
+where = ["backend/src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+src = ["backend/src", "tests"]
+
+[tool.setuptools.package-data]
+demo_web = ["static/*.html", "static/*.css", "static/*.js"]

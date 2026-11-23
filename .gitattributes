@@ -1,0 +1,8 @@
+# Keep shell scripts LF even when cloned/edited on Windows (CRLF breaks them on Linux)
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.ps1 text eol=crlf

@@ -1,0 +1,58 @@
+# One configuration file for infrastructure deployment and post-deployment telemetry.
+platform:
+  aws_region: eu-north-1
+  shared_vpc:
+    name: Infoblox-Sales-Demo
+    cidr: 10.10.0.0/16
+    client_subnet_cidr: 10.10.1.0/24
+  service_network_pool:
+    cidr: 10.20.0.0/16
+    prefix: 24
+  client_instance_type: t3.micro
+  client_instance_profile_name: Infoblox-Demo-Client-Profile
+
+infoblox:
+  base_url: https://csp.infoblox.com
+  auth_scheme: Token
+  service_location: AWS Europe (Frankfurt)
+  endpoint_size: S
+  provision_timeout_seconds: 900
+  poll_interval_seconds: 20
+
+vpn:
+  customer_gateway_asn: 65500
+  aws_bgp_asn: 64512
+  pre_shared_key_env: IPSEC_PSK
+
+services:
+  dns_enabled: true
+  dhcp_enabled: true
+  threat_defense_enabled: true
+  security_policy: Default Global Policy
+
+# Post-deployment traffic settings. DNS server is populated automatically from deployment state.
+telemetry_integration:
+  tenant_url: https://csp.infoblox.com
+  dns_source_mode: spoof
+  tide_limit: 100
+  max_assets: 500
+  zones:
+    enabled: true
+    zones:
+      - fqdn: demo.internal.
+        comment: unified demo zone
+        records:
+          - {name: host1, type: A, rdata: {address: 10.99.0.10}, ttl: 300}
+          - {name: host2, type: A, rdata: {address: 10.99.0.11}, ttl: 300}
+
+  # DHCP is served by the same NIOS-XaaS service IP as DNS. Do not set server manually.
+  # The module creates/assigns this IPAM scope to the resolved dhcp/host object.
+  # Synthetic DHCP clients remain independent from Asset Insights.
+  dhcp:
+    subnet: 10.40.0.0
+    cidr: 24
+    range_start: 10.40.0.100
+    range_end: 10.40.0.200
+    ip_space: unified-sales-demo
+    # relay_agent_ip should be an address reachable through the Cloud VPN from NIOS-XaaS.
+    # relay_agent_ip: 10.10.1.50

@@ -1,0 +1,95 @@
+# Integration contract for a parent DNS/DHCP/Threat Defense deployment project.
+# The parent automation should render/copy these values into config/config.yaml
+# after it deploys the Infoblox services.
+
+asset_source:
+  base_url: "https://YOUR-TENANT"
+  api_key_env: INFOBLOX_API_KEY
+  auth_scheme: token
+  page_size: 100
+  max_assets: 500
+  verify_tls: true
+  ip_selection:
+    private_only: true
+    include_cidrs: []
+    exclude_cidrs: []
+
+store:
+  type: json
+  path: state/assets.json
+
+dns:
+  server: "DNS_SERVER_IP_FROM_DEPLOYMENT"
+  port: 53
+  source_mode: spoof
+  domains_file: ../state/tide_domains.json
+  query_types: [A]
+  rate_per_asset: 1.0
+  duration: 10
+  concurrency: 5
+  timeout: 2.0
+
+threat_defense:
+  domains: []
+  tide:
+    enabled: true
+    limit: 100
+    category: blocked
+  enabled_scenarios: [normal-dns, blocked-domain, suspicious-domain, mixed-workload]
+
+zones:
+  enabled: true
+  # dns_host is intentionally omitted. The module resolves dns.server -> dns/host/<id>.
+  query_devices: 5
+  wait_seconds: 90
+  negative_names: [does-not-exist]
+  zones:
+    - fqdn: demo.internal.
+      comment: integration test zone
+      records:
+        - {name: host1, type: A, rdata: {address: 10.99.0.10}, ttl: 300}
+        - {name: host2, type: A, rdata: {address: 10.99.0.11}, ttl: 300}
+        - {name: mail-test, type: MX, rdata: {preference: 10, exchange: mail.demo.internal.}}
+
+dhcp:
+  provider: native
+  server: "DHCP_SERVER_IP_FROM_DEPLOYMENT"
+  port: 67
+  delay_between: 0.5
+  dra:
+    # Despite the historical section name, the native provider uses this as BOOTP giaddr.
+    # It MUST be an IPv4 address owned by the traffic-generator/relay host.
+    relay_agent_ip: "TRAFFIC_GENERATOR_LOCAL_IP"
+    lease_dir: state/dhcp
+    send_hostname: true
+    timeout: 30
+    verbose: true
+
+ipam:
+  enabled: true
+  # dhcp_host is intentionally omitted. The module resolves dhcp.server -> dhcp/host/<id>.
+  ip_space: asset-insights-ddi-demo
+  create_ip_space: true
+  wait_seconds: 60
+  subnets:
+    - address: "DHCP_SUBNET_NETWORK"
+      cidr: 20
+      name: demo-subnet
+      ranges:
+        - {start: "DHCP_RANGE_START", end: "DHCP_RANGE_END", name: demo-range}
+
+safety:
+  # Parent deployment MUST populate this with the deployed resolver IP.
+  allowed_dns_servers: ["DNS_SERVER_IP_FROM_DEPLOYMENT"]
+  allow_public_dns_server: false
+  max_total_qps: 200
+  max_duration: 900
+  max_assets_per_run: 500
+
+reporting:
+  output_dir: reports
+  state_dir: state
+  verification_buffer_minutes: 5
+
+logging:
+  level: INFO

@@ -1,0 +1,52 @@
+# Rehearsal/CI configuration: mock DNS responder + in-memory DHCP (nothing reaches Infoblox).
+#
+# Assets still come from an Asset Insights API. Point base_url at the mock Asset Insights API
+# from your other repo (it must serve POST /api/v1/assets/search), or skip discovery and load a
+# saved response:
+#
+#   export INFOBLOX_API_KEY=dummy
+#   demo --config config/config.mock.yaml assets import saved-response.json
+#   demo --config config/config.mock.yaml run-demo --skip-discovery
+#
+# The ".test" domains are reserved (RFC 6761), not real threat domains; the mock DNS answers them.
+
+asset_source:
+  base_url: http://127.0.0.1:8099
+  auth_scheme: token
+  page_size: 100
+  ip_selection: {private_only: true}
+
+store:
+  type: json
+  path: state/mock-assets.json
+
+infrastructure:
+  type: mock
+  mock:
+    nxdomain_domains: [mock-blocked-1.test]
+
+dns:
+  rate_per_asset: 2.0
+  duration: 3
+  concurrency: 8
+  timeout: 1.0
+  seed: 42
+
+dhcp:
+  provider: auto
+
+threat_defense:
+  domains:
+    - {name: mock-blocked-1.test, category: blocked, expected_action: block}
+    - {name: mock-suspicious-1.test, category: suspicious, expected_action: log}
+  enabled_scenarios: [normal-dns, blocked-domain, suspicious-domain, high-volume-dns, mixed-workload]
+
+safety:
+  max_total_qps: 200
+
+reporting:
+  output_dir: reports
+  state_dir: state
+
+logging:
+  level: WARNING

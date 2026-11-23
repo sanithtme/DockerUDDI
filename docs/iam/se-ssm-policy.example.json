@@ -1,0 +1,32 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "StartSessionOnlyToSalesController",
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": [
+        "arn:aws:ec2:<REGION>:<ACCOUNT_ID>:instance/<CONTROLLER_INSTANCE_ID>",
+        "arn:aws:ssm:<REGION>::document/SSM-SessionManagerRunShell"
+      ]
+    },
+    {
+      "Sid": "OwnSessionControl",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:ResumeSession",
+        "ssm:TerminateSession"
+      ],
+      "Resource": "arn:aws:ssm:<REGION>:<ACCOUNT_ID>:session/${aws:userid}-*"
+    },
+    {
+      "Sid": "ReadControllerForConsoleDiscovery",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ssm:DescribeInstanceInformation"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
