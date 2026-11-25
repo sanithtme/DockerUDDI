@@ -589,9 +589,29 @@ It remains bound to `127.0.0.1:8787` by default and is intended to be reached th
 When Session Manager maps every shell to `ssm-user`, use the host-side `demo-workspace` launcher to create an isolated runtime per SE. See `docs/PER_SE_CONTAINERS.md`.
 
 ```bash
-docker build -t infoblox-nios-xaas-demo:2.1.0 .
+docker build -t infoblox-nios-xaas-demo:2.2.0 .
 demo-workspace create sanith --customer "ACME Bank"
 demo-workspace status sanith
 ```
 
 The entered SE name selects a workspace; it is not authentication. Each runtime gets separate state, logs, locks, web process/port, and deployment-scoped DHCP client namespace.
+
+## v2.2 Browser-only SE workflow
+
+Sales engineers do not need Docker, Git, Python, or deployment CLI commands. An administrator starts the host workspace portal once:
+
+```bash
+demo-portal --host 127.0.0.1 --port 8787
+```
+
+The SE reaches that portal through the approved SSM port forward and completes the entire workflow in the browser:
+
+1. Enter an **SE / Workspace Name** (for example `sanith`). This is a workspace selector, not authentication; SSM remains the controller access gate.
+2. Enter a **Customer / Demo Name** (for example `ACME Bank`). This is a label only.
+3. Enter the **Infoblox API key**. The host portal forwards it to the selected container backend; it is held in memory for that container web session and is not written to the workspace registry.
+4. The host creates/opens the dedicated SE container, waits for health, validates the credential, and runs backend readiness automatically.
+5. The GUI presents only the safe next action: Deploy New, Resume, Generate Traffic, Cleanup, or a prerequisite/ownership block.
+
+Each workspace receives a deterministic container name, persistent state root, localhost-only container port, and DHCP MAC namespace. The container runs with capabilities dropped and `NET_RAW` added; it is not launched with `--privileged`.
+
+Admin/debug commands such as `demo-workspace` and `demo` remain available, but they are not part of the normal SE workflow.

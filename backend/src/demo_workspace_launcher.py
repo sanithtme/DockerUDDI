@@ -1,15 +1,19 @@
 from __future__ import annotations
-import argparse, json, subprocess, sys
-from demo_workspace import create, record, sanitize
+import argparse, json, subprocess
+from demo_workspace import create, get_record, sanitize, start, stop, container_status, list_records
+
 
 def main():
-    p=argparse.ArgumentParser(prog='demo-workspace',description='Per-SE container workspace launcher (workspace name is a selector, not authentication)')
+    p=argparse.ArgumentParser(prog='demo-workspace',description='Admin/debug workspace launcher. SEs normally use the browser UI.')
     s=p.add_subparsers(dest='cmd',required=True)
     c=s.add_parser('create'); c.add_argument('se_name'); c.add_argument('--customer',default='')
     for n in ('status','stop','start'): q=s.add_parser(n); q.add_argument('se_name')
-    a=p.parse_args(); name=sanitize(a.se_name); r=record(name,getattr(a,'customer',''))
-    if a.cmd=='create': r=create(name,a.customer); print(json.dumps(r,indent=2)); print(f"Open through SSM port forwarding: local {r['port']} -> controller 127.0.0.1:{r['port']}"); return 0
-    if a.cmd=='status':
-        x=subprocess.run(['docker','inspect','-f','{{.State.Status}}',r['container']],text=True,capture_output=True); print((x.stdout.strip() or 'not-created')); print(json.dumps(r,indent=2)); return 0 if x.returncode==0 else 1
-    subprocess.run(['docker',a.cmd,r['container']],check=True); return 0
+    s.add_parser('list')
+    a=p.parse_args()
+    if a.cmd=='list': print(json.dumps(list_records(),indent=2)); return 0
+    name=sanitize(a.se_name)
+    if a.cmd=='create': r=create(name,a.customer); print(json.dumps(r,indent=2)); return 0
+    if a.cmd=='status': r=get_record(name); r['status']=container_status(r); print(json.dumps(r,indent=2)); return 0
+    r=start(name) if a.cmd=='start' else stop(name); print(json.dumps(r,indent=2)); return 0
+
 if __name__=='__main__': raise SystemExit(main())

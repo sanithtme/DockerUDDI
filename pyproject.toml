@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "infoblox-unified-sales-demo"
-version = "2.1.0"
+version = "2.2.0"
 description = "Unified Infoblox sales deployment plus DNS/DHCP/Threat Defense traffic and telemetry validation"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,7 @@ dev = ["pytest>=7", "ruff>=0.4"]
 [project.scripts]
 demo = "demo_launcher:main"
 demo-workspace = "demo_workspace_launcher:main"
+demo-portal = "workspace_web_launcher:main"
 
 [tool.setuptools.packages.find]
 where = ["backend/src"]
@@ -32,3 +33,4 @@ src = ["backend/src", "tests"]
 
 [tool.setuptools.package-data]
 demo_web = ["static/*.html", "static/*.css", "static/*.js"]
+workspace_web = ["static/*.html", "static/*.css", "static/*.js"]

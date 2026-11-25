@@ -9,7 +9,7 @@ The SE types a workspace name such as `sanith` or `alice`. **This name is a work
 Install Docker and allow the controlled launcher to manage only these demo containers. Build once:
 
 ```bash
-docker build -t infoblox-nios-xaas-demo:2.1.0 .
+docker build -t infoblox-nios-xaas-demo:2.2.0 .
 ```
 
 Create/open an SE runtime:
