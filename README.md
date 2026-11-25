@@ -1,617 +1,126 @@
-# Infoblox Unified Sales Demo — SE Deployment Release
+# Infoblox NIOS-XaaS Demo — Backend MVP
 
 **Author:** Sanith V Kumar, TME
 
-One sales-facing CLI deploys and validates a complete Infoblox demo environment while preserving retry, ownership, allocation, and cleanup safety.
+Backend-only MVP for validating NIOS-XaaS deployment, AWS VPN/BGP reconciliation, DNS/DHCP/Threat Defense traffic, status, resume, and cleanup before adding a frontend.
 
-**Start here for production architecture, IAM, SSM access, user isolation, addressing/capacity, BGP, concurrency and cost controls:** [`docs/SE_DEPLOYMENT_GUIDE.md`](docs/SE_DEPLOYMENT_GUIDE.md).
+## MVP operating model
+
+A shared SSM controller may expose every human as Linux `ssm-user`. The MVP therefore isolates each test/demo run in its own Docker runtime. The SE supplies a name and customer label to `install-demo.sh`; the installer appends a UTC timestamp and creates a distinct container and persistent workspace.
+
+The supplied SE name is a workspace/ownership label, not cryptographic authentication. SSM remains the access gate to the controller.
+
+## One-time controller prerequisite
+
+Docker must be installed and running. The administrator should configure Docker access for the account/service that runs the installer. Do not give every production SE unrestricted Docker daemon access; for the MVP this is an admin/test workflow.
+
+## Create an isolated runtime
+
+```bash
+./install-demo.sh
+```
+
+Example input:
+
+```text
+SE name: sanith
+Customer/demo name: ACME Bank
+```
+
+Example runtime:
+
+```text
+sanith-20261125-185200
+```
+
+The same SE can run the installer again and receives another timestamped isolated runtime.
+
+## Enter the runtime and test the backend
+
+The installer prints the exact container name. Enter it with the printed `docker exec` command, then set the API key only inside that container session:
+
+```bash
+export INFOBLOX_API_KEY='<key>'
+```
+
+Do not bake API keys into the image, Git, config examples, or installer arguments.
+
+### Backend commands
+
+```bash
+demo readiness
+
+demo deploy --dry-run --new   # plan a genuinely new deployment
+demo deploy --new             # intentionally create a new deployment
+demo deploy                   # resume/reconcile saved deployment only
+
+demo status
+demo traffic
+demo cleanup
+```
+
+## Required lifecycle rules
+
+- `--new` creates a distinct deployment and ignores unrelated existing CSP services. It never adopts an older endpoint merely because region/provider/ASN values match.
+- Plain `demo deploy` resumes only the saved deployment. It reuses same-deployment CGWs, VPNs and tunnel `/30`s and never blindly recreates them.
+- Foreign CSP/AWS ownership causes an ownership block with no modification.
+- Deployment locking prevents concurrent mutation of the same deployment.
+- Cleanup persists `phase=cleaned`, removes the deployment PSK file after successful cleanup, and cleaned deployments are not resumable.
+- Shared VPC/VGW infrastructure is retained by normal cleanup.
+- IPsec UP is not enough for readiness: BGP must be UP and routes must be learned before `DEMO READY`.
+
+## Live progress and status
+
+The container sets `PYTHONUNBUFFERED=1`. Long waits emit progress even when output is captured by Docker/logging. Checkpoints are written during deployment so another shell can run `demo status`.
+
+Status symbols are strict:
+
+```text
+✓ confirmed successful
+⠋ currently running/waiting
+○ pending/not started
+⚠ attention required/resumable
+✗ confirmed failure
+```
+
+A stage is never marked ✓ merely because it was attempted.
+
+Example BGP-attention state:
+
+```text
+✓ Plan
+✓ NIOS-XaaS
+✓ AWS VPN
+✓ Demo client
+✓ Tunnel endpoints
+⚠ BGP / routes
+
+Tunnel 1: IPSEC IS UP, BGP DOWN, routes=0
+Tunnel 2: IPSEC IS UP, BGP DOWN, routes=0
+
+State preserved. Correct connectivity/BGP and run: demo deploy
+```
+
+## Multiple existing services
+
+Existing unrelated NIOS-XaaS/CSP services are allowed to coexist. A new deployment uses a new deployment ID/service network/tunnel allocation. Resume is strict and reconciles only its own saved deployment.
+
+## DHCP isolation
+
+Each timestamped runtime carries a unique owner/runtime identity and persistent workspace. DHCP configuration and synthetic-client state are deployment-scoped. Synthetic DHCP remains separate from Asset Insights inventory. Containers are not launched with `--privileged`; the MVP grants `NET_RAW` only. If a platform-specific DHCP path proves to require an additional capability, add only the minimum required capability after testing.
+
+## AWS credentials inside the container
+
+The MVP uses host networking so the container can use the controller's normal AWS instance-role/IMDS path and low-level traffic path without copying AWS credentials into the container. Verify with `aws sts get-caller-identity` if AWS CLI is installed, or `demo readiness` through boto3.
 
 ## Repository layout
 
-The Git repository is deliberately split into `backend/`, `frontend/`, `config/`, `docs/`, `scripts/`, and `tests/`. See `docs/REPOSITORY_STRUCTURE.md` for the complete layout. The browser UI source lives in `frontend/static/`; run `./scripts/sync_frontend.sh` after frontend edits before packaging/installing.
-
-## 1. What this project builds
-
-`demo deploy --new` creates a new demo deployment containing:
-
-- one **NIOS-XaaS service** with **Threat Defense + DNS + DHCP** enabled;
-- the AWS VPN/BGP connectivity required by the deployment engine;
-- the demo EC2/client resources owned by that deployment;
-- post-deployment Asset Insights + TIDE preparation;
-- internal/external DNS traffic and synthetic DHCP traffic/leases.
-
-Asset Insights devices and synthetic DHCP clients remain separate. Asset Insights IPs are used for DNS attribution; DHCP identities/MACs are generated by the traffic module.
-
 ```text
-Sales user
-   |
-   | demo ...
-   v
-Shared Controller EC2
-   |
-   +-- central admin-managed application: /opt/infoblox-sales-demo
-   |
-   +-- per-user workspace: ~/.infoblox-demo
-          |
-          +-- deployment checkpoints / pending plan / secrets
-          +-- generated telemetry config
-          +-- Asset Insights + TIDE state
-          +-- DHCP state / leases
-          +-- reports / logs
-   |
-   +--> AWS + Infoblox Cloud
-          |
-          +-- NIOS-XaaS: TD + DNS + DHCP
-          +-- VPN/BGP
-          +-- deployment-owned demo client/resources
+backend/       deployment + traffic implementation
+config/        configuration examples
+scripts/       supporting backend scripts
+tests/         backend tests
+install-demo.sh
+Dockerfile
+README.md
 ```
-
-
-## Production deployment model
-
-The recommended operating model separates **human access** from **AWS provisioning authority**:
-
-```text
-SE -> AWS Identity Center/IAM -> SSM -> Shared Controller EC2
-                                      |
-                                      +-- controller instance role -> AWS provisioning
-                                      +-- Infoblox API -> NIOS-XaaS TD/DNS/DHCP
-                                      +-- per-SE ~/.infoblox-demo workspace
-```
-
-- SE identities should be scoped to SSM access to the approved controller rather than receiving broad EC2/VPN permissions.
-- The controller EC2 uses a dedicated instance role for the AWS API operations required by `demo deploy`.
-- The generated demo client uses a separate minimal role; it must never inherit the controller provisioning role.
-- Use SSM **Run As** / unique Linux identities for multi-SE isolation. A shared `ssm-user` is suitable only for single-user testing.
-- Docker is not required; the application uses a central Python virtual environment and per-user Linux workspaces.
-- The shared VPC/subnet/route table/VGW are retained; per-deployment CGWs, VPNs, client EC2 and service network are isolated by deployment identity.
-
-Example IAM templates are under [`docs/iam/`](docs/iam/). They must be adapted and validated in the target AWS account before production use.
-
-### Addressing and BGP defaults
-
-The example configuration uses `10.10.0.0/16` for the shared AWS platform and allocates NIOS-XaaS service networks as `/24`s from `10.20.0.0/16`. A `/16` contains 256 candidate `/24`s mathematically, but actual concurrency is also constrained by AWS/Infoblox quotas. The NIOS-XaaS service IP is the third usable address of each allocated service network (for example `10.20.2.3`). TD, DNS and DHCP are capabilities of that same NIOS-XaaS service.
-
-BGP ASNs are configured, not randomized: the example uses customer/NIOS-X ASN `65500` and AWS VGW ASN `64512`. Tunnel-inside `/30`s are dynamically selected from unused supported link-local ranges.
-
-### Cost and lifecycle
-
-`demo cleanup` removes deployment-owned AWS/client resources and retains the shared platform. For a larger SE rollout, add a central deployment registry with atomic network reservations and an `ExpiresAt`/TTL policy so abandoned demos can be identified and cleaned up safely. Automated cleanup must reuse the same ownership checks and must never blindly delete shared or foreign CSP resources.
-
-## 2. Sales CLI
-
-The normal workflow is intentionally small:
-
-```bash
-demo setup
-demo readiness
-demo deploy --new
-demo status
-demo traffic
-demo cleanup
-```
-
-Meaning:
-
-| Command | Purpose |
-|---|---|
-| `demo setup` | Create this salesperson's private workspace/config. Run once. |
-| `demo readiness` | Validate AWS, Infoblox, configuration, shared network and service prerequisites. |
-| `demo deploy --new` | Intentionally create a new demo deployment. |
-| `demo deploy` | Resume/reconcile an existing unambiguous deployment or execute a saved dry-run plan. |
-| `demo status` | Show deployment status. |
-| `demo traffic` | Prepare/run the integrated DNS/TD/DHCP traffic workflow. |
-| `demo cleanup` | Remove deployment-owned resources while retaining shared platform resources. |
-
-`demo init` and `demo doctor` remain backward-compatible aliases, but sales documentation should use `setup` and `readiness`.
-
-### Optional dry-run
-
-For careful testing, plan first:
-
-```bash
-demo deploy --dry-run --new
-```
-
-Then execute the exact saved plan with:
-
-```bash
-demo deploy
-```
-
-Do **not** add `--new` to the second command. The pending plan contains the deployment ID, service network and tunnel CIDRs that the real deployment must reuse.
-
-## 3. Deployment safety contract
-
-These behaviors are part of the deployment contract and must not be weakened by wrapper/UI changes.
-
-| Situation | Behavior |
-|---|---|
-| First/new demo | Requires intentional `--new`. |
-| Dry-run followed by deploy | Reuses saved deployment ID, service network and tunnel CIDRs. |
-| Same deployment rerun | Reconciles/resumes; does not intentionally duplicate resources. |
-| Failure halfway through | Reuses checkpointed/discovered/tagged resources and continues. |
-| Existing matching CSP deployment | Reuses it only when matching state/PSKs are available. |
-| Existing unrelated CSP deployment | **OWNERSHIP BLOCK**; no CSP modification. |
-| Multiple local deployments | Requires explicit `--deployment-id`. |
-| Multiple SE tenants/deployments | Allocates unique service network + unique tunnel `/30`s. |
-| Existing VPC/subnet/route table/VGW | Reused. |
-| IPsec up but BGP converging | Waits; does not prematurely report ready. |
-| BGP routes learned | Reports `DEMO READY`. |
-| Normal cleanup | Removes deployment-owned AWS/client resources; retains shared platform resources. |
-
-The deployment ID is authoritative on retry. Saved service network, tunnel CIDRs and PSKs are immutable for that deployment. Missing persisted PSKs for an already-existing matching CSP deployment are a blocking condition; replacement PSKs are not silently generated.
-
-Plain `demo deploy` is deliberately conservative:
-
-- one resumable deployment -> resume/reconcile it;
-- a saved dry-run pending plan -> execute that plan;
-- multiple active deployments -> stop and require `--deployment-id`;
-- no resumable deployment -> stop and require `--new`.
-
-## 4. Shared Sales Controller EC2
-
-### Recommended model
-
-Use one shared Linux controller EC2 initially. Give every salesperson a **different Linux login**. With AWS Systems Manager, configure **Session Manager Run As** (for example via IAM principal tags mapped to Linux users) so each authenticated salesperson lands as a unique OS user. Do not let the team share `ssm-user` or `ec2-user`, because the default workspace is based on `$HOME`.
-
-```text
-/opt/infoblox-sales-demo/       admin-managed Git checkout/install
-/home/alice/.infoblox-demo/     Alice runtime
-/home/bob/.infoblox-demo/       Bob runtime
-/home/charlie/.infoblox-demo/   Charlie runtime
-```
-
-The application code is shared. Runtime state is not.
-
-A normal EC2 instance does **not** automatically scale CPU/RAM. Start with a suitably sized controller and monitor it. An Auto Scaling Group would require redesigning local per-user state (for example shared storage/database) and low-level DHCP traffic placement; it is not enabled by this repository.
-
-### Access
-
-Prefer AWS Systems Manager Session Manager / controlled identity access over distributing one shared PEM. **Production multi-user requirement:** do not accept the default shared `ssm-user`; configure SSM Run As so `whoami` is unique per salesperson. `demo setup` warns when it detects `ssm-user`. If SSH is used, use individual user keys, not one private key shared across the sales team.
-
-## 5. Administrator installation
-
-Example central installation:
-
-```bash
-sudo mkdir -p /opt/infoblox-sales-demo
-sudo chown "$USER" /opt/infoblox-sales-demo
-git clone <YOUR-REPO-URL> /opt/infoblox-sales-demo
-cd /opt/infoblox-sales-demo
-python3 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -e .
-sudo ln -sf /opt/infoblox-sales-demo/.venv/bin/demo /usr/local/bin/demo
-```
-
-Verify:
-
-```bash
-demo --help
-```
-
-Administrator update:
-
-```bash
-cd /opt/infoblox-sales-demo
-git pull
-.venv/bin/pip install -e .
-```
-
-Salespeople should not modify or pull the central checkout.
-
-## 6. Salesperson first-time setup
-
-Login with the salesperson's own Linux identity and run:
-
-```bash
-demo setup
-```
-
-This creates, without changing the Git checkout:
-
-```text
-~/.infoblox-demo/
-├── config.yaml
-├── deployment/
-├── state/
-├── reports/
-├── logs/
-└── telemetry.config.yaml    # generated after a ready deployment
-```
-
-Show the active workspace:
-
-```bash
-demo workspace
-```
-
-Edit only the user's generated config if environment-specific values are required:
-
-```bash
-vi ~/.infoblox-demo/config.yaml
-```
-
-`INFOBLOX_DEMO_WORKSPACE` can override the default, primarily for administration/testing.
-
-## 7. Live progress, interruption and resume
-
-Deployment operations show active progress for long-running NIOS-XaaS provisioning, CSP tunnel updates, and IPsec/BGP convergence. A deployment is not ready until the selected AWS tunnels report `UP` and have learned routes.
-
-If the user presses `Ctrl+C`, closes the terminal, or loses the SSM session, do not start another new deployment. Reconnect and run:
-
-```bash
-demo status
-demo deploy
-```
-
-`demo deploy` resumes/reconciles the checkpointed deployment. **Do not use `--new` to resume.** A per-deployment process lock prevents two deployment processes from intentionally operating on the same local deployment simultaneously.
-
-`demo status` presents the current phase in sales-facing terms instead of only dumping raw checkpoint JSON.
-
-## 8. CSP ownership protection
-
-CSP ownership is a hard safety boundary. Before an existing endpoint is reused **and again before any CSP update**, the endpoint must belong to the current deployment ID (deployment-specific name/tag). Matching service location, provider, ASN, or other configuration is not proof of ownership.
-
-If a different deployment's endpoint is discovered, the command stops with `OWNERSHIP BLOCK` and makes no CSP modification. A `--new` deployment must never silently adopt yesterday's endpoint/access location.
-
-## 9. Credentials
-
-The Infoblox API key is read from:
-
-```text
-INFOBLOX_API_KEY
-```
-
-For initial testing:
-
-```bash
-export INFOBLOX_API_KEY='...'
-```
-
-Do not commit API keys, PSKs, real runtime configs or deployment state to Git. For a shared production controller, prefer retrieving the Infoblox credential from an approved secret store rather than permanently placing it in shell profiles.
-
-AWS access should preferably come from the controller EC2's IAM instance role rather than static AWS access keys on disk.
-
-## 10. Readiness check
-
-Run:
-
-```bash
-demo readiness
-```
-
-This is the sales-facing name for the deployment engine's preflight/doctor operation. It validates the configuration and checks AWS/Infoblox access and shared deployment prerequisites before real infrastructure changes.
-
-A successful underlying check reports the AWS account/region/shared VPC and whether DNS, DHCP and TD are enabled.
-
-## 11. First full deployment test
-
-Recommended first test:
-
-```bash
-demo readiness
-demo deploy --dry-run --new
-```
-
-Review the generated deployment ID, service network and tunnel CIDRs. Then:
-
-```bash
-demo deploy
-```
-
-The deployment checkpoints phases locally. If interrupted, do **not** start another new deployment. Retry:
-
-```bash
-demo deploy
-```
-
-If the user's workspace contains multiple active deployments, specify the intended one:
-
-```bash
-demo deploy --deployment-id <deployment-id>
-```
-
-The deployment does not report `DEMO READY` merely because IPsec is up. It waits for the BGP readiness gate/learned routes.
-
-## 12. NIOS-XaaS: TD + DNS + DHCP
-
-The deployment engine builds the NIOS-XaaS capability list from `services`:
-
-```yaml
-services:
-  dns_enabled: true
-  dhcp_enabled: true
-  threat_defense_enabled: true
-  security_policy: Default Global Policy
-```
-
-The same deployed NIOS-XaaS service IP is handed to the telemetry layer for DNS and DHCP.
-
-The DHCP demo scope/range remains explicit policy in the user config, for example:
-
-```yaml
-telemetry_integration:
-  dhcp:
-    subnet: 10.40.0.0
-    cidr: 24
-    range_start: 10.40.0.100
-    range_end: 10.40.0.200
-    ip_space: unified-sales-demo
-```
-
-After the deployment reaches `ready`, the wrapper generates `~/.infoblox-demo/telemetry.config.yaml` from deployment state. It resolves/provisions the DHCP/IPAM objects through the telemetry module rather than requiring the parent deployment engine to duplicate that implementation.
-
-## 13. Traffic test
-
-The high-level command is:
-
-```bash
-demo traffic
-```
-
-It uses the generated telemetry configuration and the existing traffic module. The module preserves:
-
-- Asset Insights inventory retrieval;
-- TIDE domain retrieval/normalization;
-- external/security DNS traffic;
-- internal zone/record operations;
-- Asset Insights source-IP DNS attribution;
-- IPAM subnet/range handling;
-- independent synthetic DHCP clients;
-- native DHCP DISCOVER/OFFER/REQUEST/ACK workflow;
-- reports/state/safety limits.
-
-Individual traffic commands remain available for troubleshooting/testing:
-
-```bash
-demo prepare
-demo ipam apply
-demo dns run --all
-demo dhcp synthetic --count 10
-```
-
-Raw/spoofed DNS and native DHCP operations are best run on Linux and may require privileges. When sudo is required and the API key is exported in the current shell:
-
-```bash
-sudo --preserve-env=INFOBLOX_API_KEY demo dhcp synthetic --count 10
-```
-
-## 14. Status and retry
-
-```bash
-demo status
-```
-
-For a specific deployment:
-
-```bash
-demo status --deployment-id <deployment-id>
-```
-
-If deployment failed halfway:
-
-```bash
-demo deploy
-```
-
-or, when explicit selection is necessary:
-
-```bash
-demo deploy --deployment-id <deployment-id>
-```
-
-Do not use `--new` for a retry.
-
-## 15. Cleanup
-
-Normal cleanup:
-
-```bash
-demo cleanup
-```
-
-Specific deployment:
-
-```bash
-demo cleanup --deployment-id <deployment-id>
-```
-
-Cleanup follows the original ownership model: deployment-owned AWS/client resources are removed; shared platform resources are retained. The CSP ownership guard prevents an unrelated deployment from being silently adopted/modified.
-
-## 16. Git/runtime hygiene
-
-Keep these out of Git:
-
-- API keys and credentials;
-- deployment secrets / PSKs;
-- pending plans;
-- deployment checkpoints;
-- generated telemetry configuration;
-- Asset Insights/TIDE runtime snapshots;
-- DHCP lease/state data;
-- reports/logs containing runtime details.
-
-The repository `.gitignore` already covers the module's normal runtime paths. The recommended shared-controller design additionally keeps all salesperson runtime under `~/.infoblox-demo`, outside the central checkout.
-
-## 17. Validation before live testing
-
-Offline/source checks:
-
-```bash
-python -m compileall -q unified_demo.py deployment src
-python -m pytest -q
-```
-
-Then perform live testing in this order:
-
-```bash
-demo setup
-demo readiness
-demo deploy --dry-run --new
-demo deploy
-demo status
-demo prepare
-demo ipam apply
-demo dns run --all
-sudo --preserve-env=INFOBLOX_API_KEY demo dhcp synthetic --count 10
-demo traffic
-```
-
-Finally verify cleanup on a disposable deployment:
-
-```bash
-demo cleanup
-```
-
-Live AWS/CSP tests intentionally require your real credentials and can change real infrastructure; the repository does not pretend those are validated by local unit tests.
-
-## 18. Troubleshooting
-
-### `User workspace does not exist`
-
-Run:
-
-```bash
-demo setup
-```
-
-### Plain deploy says `--new` is required
-
-There is no resumable deployment/pending plan in this user's workspace. If you really intend a new environment:
-
-```bash
-demo deploy --new
-```
-
-### Multiple deployments found
-
-Select one explicitly:
-
-```bash
-demo status --deployment-id <id>
-demo deploy --deployment-id <id>
-```
-
-### `OWNERSHIP BLOCK`
-
-Stop and inspect the existing CSP deployment. The tool intentionally refuses to modify an unrelated endpoint/deployment.
-
-### Existing matching CSP deployment but PSKs are unavailable
-
-Restore the matching saved deployment secrets/state or supply the supported configured PSK. Do not create replacement PSKs for the existing deployment.
-
-### IPsec is UP but deployment is not ready
-
-Allow BGP convergence. The readiness gate intentionally waits for learned routes instead of reporting false success.
-
-### DHCP traffic requires privilege
-
-On Linux, run the DHCP traffic command with the required privileges and preserve `INFOBLOX_API_KEY` when appropriate.
-
-## 19. Repository layout
-
-```text
-unified_demo.py              unified deployment/telemetry orchestration
-deployment/demo_tool.py      original safe/retry deployment engine
-src/demo_launcher.py         installed `demo` front door + per-user workspace
-src/demo_cli/                traffic/telemetry implementation
-config/unified.example.yaml  workspace configuration template
-docs/SE_DEPLOYMENT_GUIDE.md  SE architecture, IAM, SSM, isolation and operations guide
-docs/iam/                    example IAM policy templates
-docs/                        detailed telemetry/module documentation
-tests/                       traffic/telemetry tests
-integration/                 integration contract/history
-```
-
-The original detailed deployment documentation remains in `deployment/README.md`; detailed traffic architecture/safety documentation remains under `docs/`.
-
-## 20. Live-test hardening in v1.1.0
-
-This revision incorporates findings from the live shared-controller test:
-
-- CSP endpoint ownership is enforced inside both reuse and update paths; a foreign/older endpoint causes `OWNERSHIP BLOCK` before CSP modification.
-- `demo deploy --new` cannot silently adopt an endpoint from another deployment.
-- Long NIOS-XaaS/CSP/BGP waits display active progress and elapsed time.
-- `Ctrl+C` preserves checkpointed resources and tells the operator to use `demo status` then plain `demo deploy`.
-- A per-deployment lock blocks concurrent local deploy processes for the same deployment.
-- `demo status` shows the phase, service IP/CIDR, VPN IDs, whether a deployment process is running, and the next wait state.
-- `demo setup` warns when Session Manager is using shared `ssm-user`; production multi-user use requires unique OS identities (recommended: SSM Run As).
-
-## Local web interface
-
-Version 1.3.0 includes an optional localhost-only web interface over the same deployment engine used by the CLI.
-
-```bash
-demo setup
-demo web
-```
-
-It listens on `127.0.0.1:8787` by default. Reach it from an SE workstation with AWS SSM port forwarding; do **not** expose port 8787 through the EC2 security group. The UI provides readiness, new deployment, resume, live output/status, traffic generation, interruption, and ownership-protected cleanup. See `docs/WEB_UI_GUIDE.md` for setup and security details.
-
-## Web readiness and credentials (v1.6.0)
-
-The localhost web UI supports a testing-session Infoblox API key. The key is kept in backend process memory only and is not written to Git, config.yaml, deployment state, web logs, or browser storage. For production, prefer a controller role plus AWS Secrets Manager integration.
-
-**Run readiness before deployment.** Readiness separates deployment prerequisites from traffic/telemetry prerequisites and reports corrective actions. `Deploy new` is disabled until deployment prerequisites pass; `Generate traffic` remains disabled until the deployment is ready and traffic prerequisites pass.
-
-Readiness covers local workspace/configuration, API-key availability, AWS/shared-platform and NIOS-XaaS/CSP/Threat Defense control-plane checks, DNS/DHCP configuration, DHCP synthetic scope, and traffic prerequisites for Asset Insights and TIDE. Asset Insights/TIDE availability is finally exercised by the normal prepare/traffic workflow; a tenant entitlement or API permission failure is reported there without being confused with an AWS deployment failure.
-
-
-## Multi-SE identity isolation
-
-Production multi-user deployments use AWS SSO/Identity Center + SSM Run As + unique Linux users. See `docs/SSM_RUN_AS_MULTI_SE.md`. Set `INFOBLOX_DEMO_PRODUCTION=1` on the controller to reject the shared `ssm-user` identity.
-
-## v1.7 guided web workflow
-
-The localhost UI now guides an SE through the safe sequence instead of presenting every action at once:
-
-1. Enter the Infoblox API key for the current web-server session.
-2. Select **Validate & check readiness**. The credential is kept in backend memory only.
-3. Readiness validates deployment prerequisites and reports blockers.
-4. The UI inspects saved deployment state and recommends exactly one next action: **Deploy new demo**, **Resume deployment**, or **Generate traffic**.
-5. Cleanup still requires the exact deployment ID and uses the deployment engine's ownership protections.
-
-The web server can be managed without finding Python PIDs manually:
-
-```bash
-demo web start
-demo web status
-demo web restart
-demo web stop
-```
-
-It remains bound to `127.0.0.1:8787` by default and is intended to be reached through AWS SSM port forwarding. In production multi-SE mode, use AWS Identity Center/SSO with SSM Run As so each SE gets a unique Linux identity and `~/.infoblox-demo` workspace.
-
-## Per-SE containers on a shared SSM controller (v2.1)
-
-When Session Manager maps every shell to `ssm-user`, use the host-side `demo-workspace` launcher to create an isolated runtime per SE. See `docs/PER_SE_CONTAINERS.md`.
-
-```bash
-docker build -t infoblox-nios-xaas-demo:2.2.0 .
-demo-workspace create sanith --customer "ACME Bank"
-demo-workspace status sanith
-```
-
-The entered SE name selects a workspace; it is not authentication. Each runtime gets separate state, logs, locks, web process/port, and deployment-scoped DHCP client namespace.
-
-## v2.2 Browser-only SE workflow
-
-Sales engineers do not need Docker, Git, Python, or deployment CLI commands. An administrator starts the host workspace portal once:
-
-```bash
-demo-portal --host 127.0.0.1 --port 8787
-```
-
-The SE reaches that portal through the approved SSM port forward and completes the entire workflow in the browser:
-
-1. Enter an **SE / Workspace Name** (for example `sanith`). This is a workspace selector, not authentication; SSM remains the controller access gate.
-2. Enter a **Customer / Demo Name** (for example `ACME Bank`). This is a label only.
-3. Enter the **Infoblox API key**. The host portal forwards it to the selected container backend; it is held in memory for that container web session and is not written to the workspace registry.
-4. The host creates/opens the dedicated SE container, waits for health, validates the credential, and runs backend readiness automatically.
-5. The GUI presents only the safe next action: Deploy New, Resume, Generate Traffic, Cleanup, or a prerequisite/ownership block.
-
-Each workspace receives a deterministic container name, persistent state root, localhost-only container port, and DHCP MAC namespace. The container runs with capabilities dropped and `NET_RAW` added; it is not launched with `--privileged`.
-
-Admin/debug commands such as `demo-workspace` and `demo` remain available, but they are not part of the normal SE workflow.

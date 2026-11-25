@@ -23,14 +23,17 @@ class Progress:
         self.message=message; self.stop_event=threading.Event(); self.started=time.time(); self.thread=None
     def _run(self):
         i=0
+        last_line=-1
         while not self.stop_event.wait(0.2):
             elapsed=int(time.time()-self.started)
-            sys.stdout.write(f"\r  {self.FRAMES[i % len(self.FRAMES)]} {self.message}  elapsed={elapsed}s")
-            sys.stdout.flush(); i+=1
+            if sys.stdout.isatty():
+                sys.stdout.write(f"\r  {self.FRAMES[i % len(self.FRAMES)]} {self.message}  elapsed={elapsed}s")
+                sys.stdout.flush(); i+=1
+            elif elapsed and elapsed % 10 == 0 and elapsed != last_line:
+                print(f"  ... {self.message} elapsed={elapsed}s", flush=True); last_line=elapsed
     def __enter__(self):
         print(f"  > {self.message}")
-        if sys.stdout.isatty():
-            self.thread=threading.Thread(target=self._run,daemon=True); self.thread.start()
+        self.thread=threading.Thread(target=self._run,daemon=True); self.thread.start()
         return self
     def __exit__(self, exc_type, exc, tb):
         self.stop_event.set()
@@ -65,10 +68,10 @@ def load_psks(d,vpn,dry=False):
 
 class Missing(RuntimeError): pass
 class CSP:
-    def __init__(self,cfg,depid):
+    def __init__(self,cfg,depid,new_mode=False):
         key=os.getenv('INFOBLOX_API_KEY')
         if not key: raise RuntimeError('INFOBLOX_API_KEY is not set')
-        self.cfg=cfg; self.depid=depid; self.base=cfg.get('base_url','https://csp.infoblox.com').rstrip('/')
+        self.cfg=cfg; self.depid=depid; self.new_mode=new_mode; self.base=cfg.get('base_url','https://csp.infoblox.com').rstrip('/')
         self.s=requests.Session(); self.s.headers.update({'Authorization':f"{cfg.get('auth_scheme','Token')} {key}",'Accept':'application/json','Content-Type':'application/json'})
     def req(self,m,p,**kw):
         r=self.s.request(m,self.base+p,timeout=kw.pop('timeout',60),**kw)
@@ -102,9 +105,10 @@ class CSP:
         'credentials':{'create':[{'id':'ref_c1','type':'psk','name':creds[0],'value':psks[0],'cred_data':{}},{'id':'ref_c2','type':'psk','name':creds[1],'value':psks[1],'cred_data':{}}],'update':[]},'locations':{'create':[],'update':[]}}
     def ensure(self,region,vpn,psks,svc,dry=False):
         try:
-            ep,al,ips=self.discover()
-            if ep and not endpoint_owned_by(ep,self.depid): ownership_block(ep,self.depid)
-            if len(ips)>=2:return ep,al,ips[:2],False
+            if not self.new_mode:
+                ep,al,ips=self.discover()
+                if ep and not endpoint_owned_by(ep,self.depid): ownership_block(ep,self.depid)
+                if len(ips)>=2:return ep,al,ips[:2],False
         except Missing: pass
         if dry:
             print(f"PLAN CSP: create NIOS-XaaS at {self.cfg['service_location']} DNS={svc['dns']} neighbours={','.join(svc['neighbours'])}")
@@ -409,16 +413,17 @@ def deploy(a):
     tunnel_cidrs=p.reserve_tunnel_cidrs(depid,planned=planned_tunnels)
     vpn_cfg=dict(c['vpn']); vpn_cfg['tunnel_inside_cidrs']=tunnel_cidrs
     env['service_network']=svc['cidr']
-    cc=dict(c['infoblox']); cc.update({'universal_service_name':f'Infoblox-Sales-{safe(depid)}','service_ip':svc['dns'],'service_neighbour_ips':svc['neighbours']}); cs=CSP(cc,depid)
-    # Ownership guard: never adopt or modify an unrelated CSP deployment.
-    try:
-        old_ep,_,_=cs.discover(allow_partial=True)
-        if old_ep:
-            if not endpoint_owned_by(old_ep,depid): ownership_block(old_ep,depid)
-            if not kpath(depid).exists() and not os.getenv(c['vpn'].get('pre_shared_key_env','IPSEC_PSK')) and not a.dry_run:
-                raise RuntimeError('Matching CSP deployment exists but its persisted PSKs are unavailable. Refusing to generate replacements. Restore .demo-secrets for this deployment or provide the known IPSEC_PSK.')
-    except Missing:
-        pass
+    cc=dict(c['infoblox']); cc.update({'universal_service_name':f'Infoblox-NIOS-XaaS-{safe(depid)}','service_ip':svc['dns'],'service_neighbour_ips':svc['neighbours']}); cs=CSP(cc,depid,new_mode=is_new)
+    # Resume is strict; --new intentionally ignores unrelated existing CSP deployments.
+    if not is_new:
+        try:
+            old_ep,_,_=cs.discover(allow_partial=True)
+            if old_ep:
+                if not endpoint_owned_by(old_ep,depid): ownership_block(old_ep,depid)
+                if not kpath(depid).exists() and not os.getenv(c['vpn'].get('pre_shared_key_env','IPSEC_PSK')) and not a.dry_run:
+                    raise RuntimeError('Matching CSP deployment exists but its persisted PSKs are unavailable. Refusing to generate replacements. Restore .demo-secrets for this deployment or provide the known IPSEC_PSK.')
+        except Missing:
+            pass
     if a.dry_run:
         PLAN.write_text(json.dumps({'deployment_id':depid,'service_network':svc,'tunnel_inside_cidrs':tunnel_cidrs,'region':p.region,'vpc_id':env['vpc_id']},indent=2))
     keys=load_psks(depid,c['vpn'],a.dry_run)
@@ -440,9 +445,23 @@ def deploy(a):
         cs.update(ep,al,outs,c['services'],tunnel_cidrs=tunnel_cidrs)
     print('  OK CSP primary and secondary AWS outside tunnel IPs updated.')
     st=_checkpoint(depid,'csp-tunnels-updated',st)
-    with Progress('Waiting for selected IPsec/BGP tunnels to reach UP and learn routes'):
-        telemetry=aw.wait_bgp(vp,timeout=int(c['infoblox'].get('provision_timeout_seconds',900)))
-    st=_checkpoint(depid,'ready',st,vpn_telemetry=telemetry)
+    try:
+        with Progress('Waiting for selected IPsec/BGP tunnels to reach UP and learn routes'):
+            telemetry=aw.wait_bgp(vp,timeout=int(c['infoblox'].get('provision_timeout_seconds',900)))
+    except RuntimeError as e:
+        if 'BGP readiness timeout' in str(e):
+            telemetry=[]
+            for v in vp:
+                x=aw.ec2.describe_vpn_connections(VpnConnectionIds=[v])['VpnConnections'][0]
+                first=(x.get('VgwTelemetry') or [{}])[0]
+                telemetry.append({'vpn':v,'outside_ip':first.get('OutsideIpAddress'),'status':first.get('Status'),'routes':first.get('AcceptedRouteCount',0),'message':first.get('StatusMessage')})
+            _checkpoint(depid,'bgp-attention',st,vpn_telemetry=telemetry,last_error='BGP readiness timeout',last_updated_at=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))
+            print('\n⚠ BGP ATTENTION REQUIRED', flush=True)
+            for i,t in enumerate(telemetry,1): print(f"  Tunnel {i}: IPsec={t.get('message')} BGP={t.get('status')} routes={t.get('routes',0)}", flush=True)
+            print('Deployment state preserved. Correct connectivity/BGP and resume with: demo deploy', flush=True)
+            return
+        raise
+    st=_checkpoint(depid,'ready',st,vpn_telemetry=telemetry,last_updated_at=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))
     if PLAN.exists(): PLAN.unlink()
     print('DEMO READY deployment=',depid,'client=',client,'dns=',st['service_ip'])
 
@@ -450,26 +469,28 @@ def status(a):
     xs=active_states()
     if a.deployment_id:xs=[x for x in xs if x.get('deployment_id')==a.deployment_id]
     if not xs: print('No active deployments'); return
+    order=['planned','csp-ready','aws-vpn-ready','client-ready','csp-tunnels-updated','ready']
+    labels=[('Plan','planned'),('NIOS-XaaS','csp-ready'),('AWS VPN','aws-vpn-ready'),('Demo client','client-ready'),('Tunnel endpoints','csp-tunnels-updated'),('BGP / routes','ready')]
     for x in xs:
-        print('Infoblox NIOS-XaaS Demo Status')
-        print('-'*48)
-        print('Deployment ID :',x.get('deployment_id'))
-        print('Phase         :',x.get('phase','unknown'))
-        print('Service IP    :',x.get('service_ip') or (x.get('service_network') or {}).get('dns','pending'))
-        print('Service CIDR  :',(x.get('service_network') or {}).get('cidr','pending'))
-        print('AWS VPNs      :',', '.join(x.get('vpn_connection_ids') or []) or 'pending')
-        running,pid=_deployment_running(x.get('deployment_id'))
-        print('Process       :',('RUNNING (PID '+str(pid)+')') if running else 'NOT RUNNING / resumable')
+        phase=x.get('phase','unknown'); running,pid=_deployment_running(x.get('deployment_id'))
+        print('Infoblox NIOS-XaaS Demo Status'); print('-'*52)
+        print('Deployment :',x.get('deployment_id')); print('Owner      :',os.environ.get('INFOBLOX_DEMO_OWNER','workspace'))
+        print('Service IP :',x.get('service_ip') or (x.get('service_network') or {}).get('dns','pending'))
+        print('Process    :',('RUNNING (PID '+str(pid)+')') if running else 'NOT RUNNING / resumable')
+        try: idx=order.index(phase)
+        except ValueError: idx=-1
+        for label,key in labels:
+            if phase=='bgp-attention' and key=='ready': mark='⚠'
+            elif key in order and order.index(key)<=idx: mark='✓'
+            elif running and key in order and order.index(key)==idx+1: mark='⠋'
+            else: mark='○'
+            print(f'{mark} {label}')
         tel=x.get('vpn_telemetry') or []
-        if tel:
-            for i,t in enumerate(tel,1): print(f"Tunnel {i}      : {t.get('status')} routes={t.get('routes',0)} {t.get('message','')}")
-        phase=x.get('phase')
-        if phase=='ready': print('Result        : DEMO READY')
-        elif phase=='csp-tunnels-updated': print('Waiting       : IPsec/BGP convergence and learned routes')
-        elif phase=='client-ready': print('Waiting       : CSP tunnel endpoint update')
-        elif phase=='aws-vpn-ready': print('Waiting       : demo client / CSP tunnel update')
-        elif phase=='csp-ready': print('Waiting       : AWS VPN resources')
-        else: print('Waiting       : deployment/reconciliation in progress')
+        for i,t in enumerate(tel,1): print(f"  Tunnel {i}: status={t.get('status')} routes={t.get('routes',0)} {t.get('message','')}")
+        if phase=='ready': print('Result     : ✓ DEMO READY')
+        elif phase=='bgp-attention': print('Result     : ⚠ BGP ATTENTION REQUIRED — state preserved; resume with demo deploy')
+        else: print('Result     : deployment/reconciliation in progress')
+        if x.get('last_error'): print('Last error :',x.get('last_error'))
         print()
 
 def cleanup(a):
@@ -512,4 +533,7 @@ def main():
         print('Next: demo status, then resume with: demo deploy')
         print('IMPORTANT: do not use --new to resume.')
         raise SystemExit(130)
+    except RuntimeError as e:
+        print(f'ERROR: {e}', file=sys.stderr, flush=True)
+        raise SystemExit(2)
 if __name__=='__main__':main()

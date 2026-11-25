@@ -111,9 +111,8 @@ def main() -> int:
     argv = sys.argv[1:]
     if argv and argv[0] in {"setup", "init"}: return _init_workspace()
     if argv and argv[0] == "workspace": print(WORKSPACE); return 0
-    if argv and argv[0] == "web": return _web_cli(argv[1:])
     if not argv or argv == ["--help"] or argv == ["-h"]:
-        print(f"""usage: demo COMMAND [options]\n\nUnified Infoblox NIOS-XaaS sales demo\n\nUser workspace: {WORKSPACE}\n\nFirst use:\n  demo setup\n  demo workspace\n  demo web start\n  demo web status\n  demo web stop\n  demo web restart\n\nDeployment:\n  demo readiness\n  demo deploy --dry-run --new\n  demo deploy --new\n  demo deploy\n  demo status\n  demo cleanup\n\nTraffic:\n  demo traffic\n"""); return 0
+        print(f"""usage: demo COMMAND [options]\n\nInfoblox NIOS-XaaS Demo Backend MVP\n\nRuntime workspace: {WORKSPACE}\n\nFirst use:\n  demo setup\n  demo workspace\n\nDeployment:\n  demo readiness\n  demo deploy --dry-run --new\n  demo deploy --new\n  demo deploy\n  demo status\n  demo cleanup\n\nTraffic:\n  demo traffic\n"""); return 0
     try: secure_workspace(create=False)
     except RuntimeError as e: print(f"ERROR: {e}", file=sys.stderr); return 2
     if not WORKSPACE.exists(): print("ERROR: User workspace does not exist. Run: demo setup", file=sys.stderr); return 2
