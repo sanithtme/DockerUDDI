@@ -1,9 +1,22 @@
 from __future__ import annotations
-import errno, getpass, os, stat
+import errno, getpass, os, pwd, stat
 from pathlib import Path
 
 def identity():
-    return getpass.getuser()
+    explicit = os.environ.get('INFOBLOX_DEMO_OWNER','').strip()
+    if explicit:
+        return explicit
+    for key in ('LOGNAME','USER'):
+        value = os.environ.get(key,'').strip()
+        if value and value not in ('root',):
+            return value
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except (KeyError, OSError):
+        try:
+            return getpass.getuser()
+        except Exception:
+            return f'uid-{os.geteuid()}'
 
 def production_mode():
     return os.environ.get('INFOBLOX_DEMO_PRODUCTION','0') == '1'

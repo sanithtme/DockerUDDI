@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "infoblox-unified-sales-demo"
-version = "1.0.0"
+version = "1.2.0"
 description = "Unified Infoblox sales deployment plus DNS/DHCP/Threat Defense traffic and telemetry validation"
 readme = "README.md"
 requires-python = ">=3.10"

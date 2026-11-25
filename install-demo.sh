@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-IMAGE="infoblox-nios-xaas-demo-backend-mvp:1.1.0"
+IMAGE="infoblox-nios-xaas-demo-backend-mvp:1.2.0"
 BASE="${INFOBLOX_DEMO_RUNTIME_ROOT:-/var/lib/infoblox-nios-xaas-demo-mvp}"
 
 fail(){ echo "ERROR: $*" >&2; exit 2; }
@@ -37,6 +37,7 @@ fi
 
 echo "Starting isolated runtime $RUNTIME ..."
 docker run -d --name "$CONTAINER" --restart unless-stopped --network host \
+  --user "$(id -u):$(id -g)" -e HOME=/workspace \
   --cap-drop ALL --cap-add NET_RAW \
   -e PYTHONUNBUFFERED=1 -e INFOBLOX_DEMO_OWNER="$SAFE_SE" -e INFOBLOX_DEMO_CUSTOMER="$CUSTOMER" \
   -e INFOBLOX_DEMO_RUNTIME_ID="$RUNTIME" -e INFOBLOX_DEMO_WORKSPACE=/workspace \
